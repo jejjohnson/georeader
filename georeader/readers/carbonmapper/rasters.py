@@ -91,29 +91,37 @@ DEFAULT_L2B_RGB_COLLECTION = "l2b-rgb-v3a"
 #: derivation. Persistent (no signed-query expiry).
 _API_ASSET_BASE = "https://api.carbonmapper.org/api/v1/catalog/asset"
 
+#: L2B collection versions observed on the live API, newest first.
+#: Last verified 2026-07-31 — ``v3e`` is the current era; no ``v3b`` was
+#: ever observed, so it is not probed. Both candidate tuples below are
+#: generated from this one sequence, so tracking a new Carbon Mapper
+#: version is a single edit that keeps CH4 and RGB in step.
+_L2B_VERSIONS_NEWEST_FIRST: tuple[str, ...] = ("v3e", "v3d", "v3c", "v3a")
+
 #: Default L2B CH4 collection candidates probed by
 #: :meth:`CMImageRaster.from_scene_id` **only when no**
 #: :class:`~georeader.readers.carbonmapper.products.CMCollectionSpec`
 #: (or explicit ``collection``) is available — i.e. scene-name-only
-#: lookups with no plume record to resolve the version from. Order
-#: matters — newest first. The 2026-07 audit verified pairing is
-#: **same-version** (a v3d L3A plume's L2B parent serves at ``v3d``),
-#: so when a plume record is available prefer the spec path, which
-#: never goes stale. Older variants (``mfa-v3``, ``mfa-v1``,
-#: ``mfm-v1``) can be passed explicitly for historical scenes.
-DEFAULT_L2B_CH4_COLLECTION_CANDIDATES: tuple[str, ...] = (
-    "l2b-ch4-mfa-v3d",
-    "l2b-ch4-mfa-v3c",
-    "l2b-ch4-mfa-v3a",
+#: lookups with no plume record to resolve the version from.
+#:
+#: This list **rots by construction**: it is a hardcoded snapshot of a
+#: namespace Carbon Mapper extends without notice, and cannot be
+#: enumerated at run time (``/stac/collections`` stops at ``-v3a``, so
+#: current-era collections are invisible to discovery). It is a
+#: best-effort last resort, not a source of truth — whenever a plume
+#: record is available, prefer the spec path, which reads the version
+#: off the record and never goes stale. Older variants (``mfa-v3``,
+#: ``mfa-v1``, ``mfm-v1``) can be passed explicitly for historical
+#: scenes.
+DEFAULT_L2B_CH4_COLLECTION_CANDIDATES: tuple[str, ...] = tuple(
+    f"l2b-ch4-mfa-{version}" for version in _L2B_VERSIONS_NEWEST_FIRST
 )
 
 #: Default L2B RGB sibling collection candidates probed by
 #: :meth:`CMImageRaster.from_scene_id`. Same version-letter ordering
-#: as the CH4 candidates.
-DEFAULT_L2B_RGB_COLLECTION_CANDIDATES: tuple[str, ...] = (
-    "l2b-rgb-v3d",
-    "l2b-rgb-v3c",
-    "l2b-rgb-v3a",
+#: as the CH4 candidates, and the same staleness caveat.
+DEFAULT_L2B_RGB_COLLECTION_CANDIDATES: tuple[str, ...] = tuple(
+    f"l2b-rgb-{version}" for version in _L2B_VERSIONS_NEWEST_FIRST
 )
 
 
@@ -176,10 +184,20 @@ def _probe_l2b_collection(
     - ``200`` / ``206`` — winner, return this collection id.
     - ``404`` — legitimate "this scene isn't in this collection
       variant"; try the next candidate.
-    - **Anything else** (401, 403, 429, 5xx) — transient or
-      authentication failure that should NOT be silently treated as
-      "not published". Surfaced via ``raise_for_status`` so callers
-      see the real error.
+    - ``403`` — **also** "this scene isn't in this collection", just
+      phrased differently: the asset proxy answers 403 when the
+      *collection exists* but does not hold the requested scene, and
+      404 when the collection itself is unknown. Verified 2026-07-31
+      with one token in one session: ``l2b-ch4-mfa-v3e`` +
+      a March-2026 scene → 403, while the same collection + a July-2026
+      scene → 206 and a bogus ``l2b-ch4-mfa-v3q`` + the March scene →
+      404. So 403 must be skipped like 404, or a candidate list that
+      leads with a version newer than the scene aborts the whole chain.
+      This is not an auth signal: a bad or absent token returns **401**
+      (also verified), which is still surfaced.
+    - **Anything else** (401, 429, 5xx) — transient or authentication
+      failure that should NOT be silently treated as "not published".
+      Surfaced via ``raise_for_status`` so callers see the real error.
     - Transport-level errors (``ConnectionError``, ``Timeout``) — same
       reasoning: surface, don't swallow.
 
@@ -203,9 +221,11 @@ def _probe_l2b_collection(
         r.close()
         if r.status_code in (200, 206):
             return coll
-        if r.status_code == 404:
+        if r.status_code in (403, 404):
+            # Both mean "not this collection" — see the docstring for the
+            # 403-vs-404 split. Auth failures arrive as 401, not 403.
             continue
-        # 401 / 403 / 429 / 5xx — real error, not a data fact.
+        # 401 / 429 / 5xx — real error, not a data fact.
         r.raise_for_status()
     return None
 

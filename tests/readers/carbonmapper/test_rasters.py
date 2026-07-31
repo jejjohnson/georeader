@@ -440,8 +440,12 @@ class TestFromSceneIdProbe:
     design doc §4.7 — works for v3a (STAC-resident) AND v3c
     (REST-only, the 2026 L2B version)."""
 
-    def test_v3d_picked_first(self, monkeypatch):
-        """v3d is the default first candidate — single probe + success."""
+    def test_newest_candidate_picked_first(self, monkeypatch):
+        """The newest candidate is probed first — single probe + success.
+
+        Bound to the constant rather than a literal version, so tracking a
+        new Carbon Mapper version doesn't silently invalidate this test."""
+        newest = DEFAULT_L2B_CH4_COLLECTION_CANDIDATES[0]
         calls: list[str] = []
 
         def fake_get(url, **kw):
@@ -453,27 +457,28 @@ class TestFromSceneIdProbe:
         ir = CMImageRaster.from_scene_id(
             "tan20260331t181625c77s4001", token="dummy", with_rgb=False,
         )
-        # One probe — first candidate (v3d) wins.
+        # One probe — the newest candidate wins.
         assert len(calls) == 1
-        assert "l2b-ch4-mfa-v3d" in calls[0]
+        assert newest in calls[0]
         assert "_cmf.tif" in calls[0]
 
-        # All 6 CH4 asset keys built with the winning collection (v3d).
+        # All 6 CH4 asset keys built with the winning collection.
         assert set(ir.asset_paths) == {
             "cmf", "cmf-unortho",
             "uncertainty", "uncertainty-unortho",
             "artifact-mask", "uas",
         }
         for url in ir.asset_paths.values():
-            assert "l2b-ch4-mfa-v3d" in str(url)
+            assert newest in str(url)
         assert ir.asset_paths["uas"].endswith(".txt")
 
-    def test_falls_through_to_v3a(self, monkeypatch):
-        """v3d/v3c 404 → v3a 206. The 2025 case — STAC would've worked
-        too, but ``from_scene_id`` doesn't go through STAC."""
-        # CH4 probes: v3d=404, v3c=404, v3a=206 → wins.
-        # No rgb probe (with_rgb=False).
-        seq = iter([404, 404, 206])
+    def test_falls_through_to_oldest(self, monkeypatch):
+        """Every newer candidate 404s → the oldest (v3a) wins. The 2025
+        case — STAC would've worked too, but ``from_scene_id`` doesn't go
+        through STAC."""
+        # CH4 probes: every candidate 404s until the last one, which 206s.
+        oldest = DEFAULT_L2B_CH4_COLLECTION_CANDIDATES[-1]
+        seq = iter([404] * (len(DEFAULT_L2B_CH4_COLLECTION_CANDIDATES) - 1) + [206])
 
         def fake_get(url, **kw):
             return _make_probe_response(next(seq))
@@ -484,7 +489,54 @@ class TestFromSceneIdProbe:
             "tan20250801t120000c01s4001", token="dummy", with_rgb=False,
         )
         for url in ir.asset_paths.values():
-            assert "l2b-ch4-mfa-v3a" in str(url)
+            assert oldest in str(url)
+
+    def test_403_skips_to_next_candidate(self, monkeypatch):
+        """A 403 on one candidate must not abort the probe chain.
+
+        The asset proxy answers 403 when the collection exists but does
+        not hold the scene (and 404 when the collection is unknown), so
+        leading the candidate list with a version newer than the scene
+        — which is the normal state right after CM cuts a version —
+        used to raise instead of falling through to the real parent.
+        Auth failures arrive as 401 and are still surfaced (see
+        ``test_401_propagates``)."""
+        # Newest candidate 403s, next one wins.
+        seq = iter([403, 206])
+        calls: list[str] = []
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            return _make_probe_response(next(seq))
+
+        monkeypatch.setattr(_rasters.requests, "get", fake_get)
+
+        ir = CMImageRaster.from_scene_id(
+            "tan20260331t181625c77s4001", token="dummy", with_rgb=False,
+        )
+        assert len(calls) == 2
+        second = DEFAULT_L2B_CH4_COLLECTION_CANDIDATES[1]
+        for url in ir.asset_paths.values():
+            assert second in str(url)
+
+    def test_401_propagates_not_swallowed(self, monkeypatch):
+        """401 is an auth failure, not a data fact — must still raise
+        even though its neighbour 403 is now skipped."""
+        import requests as _r
+
+        resp = MagicMock()
+        resp.status_code = 401
+
+        def boom():
+            raise _r.HTTPError("401 Unauthorized", response=resp)
+
+        resp.raise_for_status = boom
+        monkeypatch.setattr(_rasters.requests, "get", lambda url, **kw: resp)
+
+        with pytest.raises(_r.HTTPError, match="401"):
+            CMImageRaster.from_scene_id(
+                "tan20260331t181625c77s4001", token="dummy", with_rgb=False,
+            )
 
     def test_all_candidates_404_raises(self, monkeypatch):
         """Every CH4 candidate 404s → ``CMSceneNotPublished``."""
@@ -502,7 +554,9 @@ class TestFromSceneIdProbe:
     def test_with_rgb_adds_sibling(self, monkeypatch):
         """`with_rgb=True` (default) probes RGB sibling candidates after
         CH4 succeeds."""
-        # CH4 v3d=206 → wins. RGB v3d=206 → wins. 2 probes total.
+        # CH4 newest=206 → wins. RGB newest=206 → wins. 2 probes total.
+        newest_ch4 = DEFAULT_L2B_CH4_COLLECTION_CANDIDATES[0]
+        newest_rgb = DEFAULT_L2B_RGB_COLLECTION_CANDIDATES[0]
         seq = iter([206, 206])
         calls: list[str] = []
 
@@ -516,16 +570,16 @@ class TestFromSceneIdProbe:
             "tan20260331t181625c77s4001", token="dummy",
         )
         assert len(calls) == 2
-        assert "l2b-ch4-mfa-v3d" in calls[0]
-        assert "l2b-rgb-v3d" in calls[1]
+        assert newest_ch4 in calls[0]
+        assert newest_rgb in calls[1]
         assert "rgb" in ir.asset_paths
-        assert "l2b-rgb-v3d" in ir.asset_paths["rgb"]
+        assert newest_rgb in ir.asset_paths["rgb"]
 
     def test_with_rgb_tolerates_rgb_404(self, monkeypatch):
         """CH4 succeeds + every RGB candidate 404s → return CH4-only,
         no exception. Rare but documented behaviour."""
-        # CH4 v3d=206 → wins. RGB v3d/v3c/v3a=404 → no rgb URL.
-        seq = iter([206, 404, 404, 404])
+        # CH4 newest=206 → wins. Every RGB candidate 404s → no rgb URL.
+        seq = iter([206] + [404] * len(DEFAULT_L2B_RGB_COLLECTION_CANDIDATES))
 
         def fake_get(url, **kw):
             return _make_probe_response(next(seq))
@@ -558,7 +612,7 @@ class TestFromSceneIdProbe:
         # First custom candidate wins; the defaults aren't probed.
         assert len(calls) == 1
         assert "l2b-ch4-mfa-v3" in calls[0]
-        assert "l2b-ch4-mfa-v3d" not in calls[0]
+        assert DEFAULT_L2B_CH4_COLLECTION_CANDIDATES[0] not in calls[0]
         assert "l2b-ch4-mfa-v3" in ir.asset_paths["cmf"]
 
     def test_transport_errors_propagate(self, monkeypatch):
@@ -608,10 +662,11 @@ class TestFromSceneIdProbe:
 
 
 def test_default_ch4_candidates_priority():
-    """Newest first — v3d is the live era (2026-07 audit). These
+    """Newest first — v3e is the live era (verified 2026-07-31). These
     defaults matter only for scene-name-only lookups; record-driven
     callers use the spec path and never probe."""
     assert DEFAULT_L2B_CH4_COLLECTION_CANDIDATES == (
+        "l2b-ch4-mfa-v3e",
         "l2b-ch4-mfa-v3d",
         "l2b-ch4-mfa-v3c",
         "l2b-ch4-mfa-v3a",
@@ -620,10 +675,19 @@ def test_default_ch4_candidates_priority():
 
 def test_default_rgb_candidates_priority():
     assert DEFAULT_L2B_RGB_COLLECTION_CANDIDATES == (
+        "l2b-rgb-v3e",
         "l2b-rgb-v3d",
         "l2b-rgb-v3c",
         "l2b-rgb-v3a",
     )
+
+
+def test_default_candidates_share_version_ordering():
+    """Both tuples are generated from one version sequence, so they
+    cannot drift apart when a new Carbon Mapper version is tracked."""
+    ch4_versions = [c.removeprefix("l2b-ch4-mfa-") for c in DEFAULT_L2B_CH4_COLLECTION_CANDIDATES]
+    rgb_versions = [c.removeprefix("l2b-rgb-") for c in DEFAULT_L2B_RGB_COLLECTION_CANDIDATES]
+    assert ch4_versions == rgb_versions
 
 
 # ─── Spec-driven (probe-free) from_scene_id ──────────────────────────
