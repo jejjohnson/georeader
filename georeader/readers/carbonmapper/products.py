@@ -24,8 +24,13 @@ from a hardcoded version list. A live-API audit (2026-07) verified:
 - the asset-proxy URL pattern
   ``{base}/{coll}/{Y}/{M}/{D}/{item}/{item}_{coll}_{key}`` for both L3A
   (item = plume_id) and L2B (item = scene name) products;
-- **same-version pairing** — a v3d L3A plume's L2B parent serves at
-  ``l2b-ch4-mfa-v3d`` (not v3c, as previously assumed);
+- **independent versioning across levels** — an L3A plume and its L2B
+  parent are re-versioned separately. They usually pair same-version (a
+  v3e L3A plume's parent serves at ``l2b-ch4-mfa-v3e``), but not always:
+  plume ``tan20260331t181625c77s4001-D`` is a v3d L3A whose parent still
+  serves at ``l2b-ch4-mfa-v3c``. So compose the parent id from the
+  record's own version and **probe** it, with older versions as backup —
+  never assume the pairing in either direction;
 - the full asset sets per family (tables below), including the PNG
   quicklooks the reader previously ignored;
 - ``/stac/collections`` stops at ``-v3a``: current-era collections

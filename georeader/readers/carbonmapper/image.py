@@ -225,8 +225,8 @@ class CMPlumeImage:
        polygon lives on this L3A asset bundle.
     2. **The L2B parent tile** for full-resolution rasters —
        :attr:`tile` resolves the parent :class:`CMImageRaster`
-       transparently for v3a (via STAC) and v3c/v3d (via URL-pattern
-       fallback). The :meth:`tile_cmf` / :meth:`tile_rgb` /
+       transparently for v3a (via STAC) and every current-era version
+       (via URL-pattern fallback). The :meth:`tile_cmf` / :meth:`tile_rgb` /
        :meth:`tile_uncertainty` methods crop the L2B band by the
        outline polygon at full native resolution — this is the
        analysis-grade workflow.
@@ -340,9 +340,10 @@ class CMPlumeImage:
     ) -> CMPlumeImage:
         """Build by fetching ``/catalog/plume/{id}`` then deriving asset URLs.
 
-        One round-trip. Works for any collection version (v3a … v3d and
-        future bumps) — the version is resolved from the record itself
-        via :class:`CMCollectionSpec`, never guessed.
+        One round-trip. Works for any collection version (v3a onwards,
+        including versions cut after this docstring was written) — the
+        version is resolved from the record itself via
+        :class:`CMCollectionSpec`, never guessed.
 
         Args:
             plume_id: Colloquial plume id.
